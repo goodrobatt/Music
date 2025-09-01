@@ -1,40 +1,217 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-import asyncio
 import logging
 import os
-from pyrogram import Client, filters
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from pytgcalls import PyTgCalls, StreamType
-from pytgcalls.types.input_stream import AudioPiped, AudioVideoPiped
-from pytgcalls.exceptions import NoActiveGroupCall
+import asyncio
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler, ContextTypes
 import yt_dlp
-import json
+import requests
+from io import BytesIO
 
-# 鬲賳馗蹖賲丕鬲 API
-API_ID = "27003875"  # 丕夭 my.telegram.org 亘诏蹖乇
-API_HASH = "8c8575dfd6a7f5ecaa7804c6214ccac5"  # 丕夭 my.telegram.org 亘诏蹖乇  
-BOT_TOKEN = "8102242216:AAE7Vu-Batpl80NLX65HQY-rLHTMED23wyE"
-SESSION_NAME = "music_bot"
+# Bot Token - جایگزین کنید با توکن جدید
+BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"
 
-# 鬲賳馗蹖賲 賱丕诏
-logging.basicConfig(level=logging.INFO)
+# تنظیمات لاگینگ
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 logger = logging.getLogger(__name__)
-
-# 爻丕禺鬲 讴賱丕蹖賳鬲
-app = Client(SESSION_NAME, api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
-pytgcalls = PyTgCalls(app)
-
-# 賲鬲睾蹖乇賴丕蹖 爻乇丕爻乇蹖
-current_song = {}
-queue = {}
-user_settings = {}
 
 class MusicBot:
     def __init__(self):
         self.ytdl_opts = {
             'format': 'bestaudio/best',
             'noplaylist': True,
+            'extractaudio': True,
+            'audioformat': 'mp3',
+            'quiet': True,
+            'no_warnings': True,
+        }
+
+    async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """دستور شروع"""
+        welcome_text = """
+🎵 سلام! به ربات موزیک خوش اومدی!
+
+دستورات قابل استفاده:
+/start - شروع ربات
+/help - راهنما
+/search - جستجو موزیک
+
+برای پخش موزیک، اسم آهنگ یا لینک یوتیوب بفرست!
+        """
+        await update.message.reply_text(welcome_text)
+
+    async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """دستور راهنما"""
+        help_text = """
+📋 راهنمای استفاده:
+
+🔍 برای جستجو:
+- اسم آهنگ بفرست
+- لینک یوتیوب بفرست
+- /search [اسم آهنگ]
+
+⚠️ نکات مهم:
+- فقط از لینک‌های قانونی استفاده کن
+- حجم فایل باید کمتر از ۵۰ مگابایت باشه
+- صبر کن تا آهنگ دانلود بشه
+
+🎵 ربات از یوتیوب موزیک و منابع آزاد استفاده می‌کنه
+        """
+        await update.message.reply_text(help_text)
+
+    async def search_music(self, query):
+        """جستجو موزیک در یوتیوب"""
+        try:
+            with yt_dlp.YoutubeDL(self.ytdl_opts) as ydl:
+                search_query = f"ytsearch5:{query}"
+                search_results = ydl.extract_info(search_query, download=False)
+                
+                if search_results and 'entries' in search_results:
+                    return search_results['entries']
+                return None
+        except Exception as e:
+            logger.error(f"خطا در جستجو: {e}")
+            return None
+
+    async def download_audio(self, url):
+        """دانلود فایل صوتی"""
+        try:
+            with yt_dlp.YoutubeDL(self.ytdl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                
+                # بررسی حجم فایل
+                if info.get('filesize') and info['filesize'] > 50 * 1024 * 1024:
+                    return None, "فایل خیلی بزرگه! (بیشتر از ۵۰ مگابایت)"
+                
+                # دانلود فایل
+                download_opts = self.ytdl_opts.copy()
+                download_opts['outtmpl'] = 'downloads/%(title)s.%(ext)s'
+                
+                with yt_dlp.YoutubeDL(download_opts) as dl:
+                    dl.download([url])
+                
+                # پیدا کردن فایل دانلود شده
+                for file in os.listdir('downloads'):
+                    if file.endswith(('.mp3', '.m4a', '.webm')):
+                        return f"downloads/{file}", info.get('title', 'Unknown')
+                        
+                return None, "فایل پیدا نشد"
+        except Exception as e:
+            logger.error(f"خطا در دانلود: {e}")
+            return None, str(e)
+
+    async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """پردازش پیام‌های کاربر"""
+        message = update.message.text
+        chat_id = update.message.chat_id
+        
+        # نمایش پیام در حال پردازش
+        processing_msg = await update.message.reply_text("🔍 در حال جستجو...")
+        
+        try:
+            # بررسی اینکه آیا لینک یوتیوب هست یا نه
+            if 'youtube.com' in message or 'youtu.be' in message:
+                url = message
+            else:
+                # جستجو در یوتیوب
+                results = await self.search_music(message)
+                if not results:
+                    await processing_msg.edit_text("❌ هیچ نتیجه‌ای پیدا نشد!")
+                    return
+                
+                # نمایش نتایج جستجو
+                keyboard = []
+                for i, result in enumerate(results[:3]):  # فقط ۳ نتیجه اول
+                    title = result.get('title', 'Unknown')[:50]
+                    duration = result.get('duration', 0)
+                    duration_str = f"{duration//60}:{duration%60:02d}" if duration else "نامعلوم"
+                    
+                    keyboard.append([InlineKeyboardButton(
+                        f"🎵 {title} ({duration_str})",
+                        callback_data=f"download:{result['webpage_url']}"
+                    )])
+                
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                await processing_msg.edit_text(
+                    f"🎵 نتایج جستجو برای: {message}",
+                    reply_markup=reply_markup
+                )
+                return
+            
+            # دانلود مستقیم
+            await processing_msg.edit_text("📥 در حال دانلود...")
+            file_path, title = await self.download_audio(url)
+            
+            if file_path:
+                await processing_msg.edit_text("📤 در حال ارسال...")
+                with open(file_path, 'rb') as audio_file:
+                    await context.bot.send_audio(
+                        chat_id=chat_id,
+                        audio=audio_file,
+                        title=title,
+                        caption=f"🎵 {title}"
+                    )
+                
+                # حذف فایل بعد از ارسال
+                os.remove(file_path)
+                await processing_msg.delete()
+            else:
+                await processing_msg.edit_text(f"❌ خطا در دانلود: {title}")
+                
+        except Exception as e:
+            logger.error(f"خطا در پردازش پیام: {e}")
+            await processing_msg.edit_text("❌ خطا در پردازش درخواست!")
+
+    async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """پردازش کال‌بک‌های دکمه‌ها"""
+        query = update.callback_query
+        await query.answer()
+        
+        if query.data.startswith('download:'):
+            url = query.data.replace('download:', '')
+            
+            await query.edit_message_text("📥 در حال دانلود...")
+            
+            file_path, title = await self.download_audio(url)
+            
+            if file_path:
+                await query.edit_message_text("📤 در حال ارسال...")
+                with open(file_path, 'rb') as audio_file:
+                    await context.bot.send_audio(
+                        chat_id=query.message.chat_id,
+                        audio=audio_file,
+                        title=title,
+                        caption=f"🎵 {title}"
+                    )
+                
+                os.remove(file_path)
+                await query.delete_message()
+            else:
+                await query.edit_message_text(f"❌ خطا در دانلود: {title}")
+
+def main():
+    """تابع اصلی"""
+    # ساخت پوشه دانلود
+    os.makedirs('downloads', exist_ok=True)
+    
+    # ساخت ربات
+    bot = MusicBot()
+    application = Application.builder().token(BOT_TOKEN).build()
+    
+    # اضافه کردن هندلرها
+    application.add_handler(CommandHandler("start", bot.start))
+    application.add_handler(CommandHandler("help", bot.help_command))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.handle_message))
+    application.add_handler(CallbackQueryHandler(bot.handle_callback))
+    
+    # شروع ربات
+    print("🤖 ربات موزیک شروع شد...")
+    application.run_polling()
+
+if __name__ == '__main__':
+    main()            'noplaylist': True,
             'extractaudio': True,
             'audioformat': 'mp3',
             'outtmpl': 'downloads/%(title)s.%(ext)s',
